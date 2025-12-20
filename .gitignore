@@ -118,6 +118,14 @@ ENV/
 env.bak/
 venv.bak/
 
+# UV specific
+.uv/
+uv.lock
+
+# Temporary files
+temp_*
+*.tmp
+
 # Spyder project settings
 .spyderproject
 .spyproject

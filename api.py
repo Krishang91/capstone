@@ -154,6 +154,7 @@ async def predict(file: UploadFile = File(...)):
             detail="Only WAV files are supported"
         )
     
+    temp_path = None
     try:
         # Save uploaded file temporarily
         temp_path = f"temp_{file.filename}"
@@ -161,18 +162,29 @@ async def predict(file: UploadFile = File(...)):
             content = await file.read()
             f.write(content)
         
+        print(f"[DEBUG] Processing file: {temp_path}")
+        
         # Preprocess audio
         audio_tensor = preprocess_audio(temp_path)
+        print(f"[DEBUG] Audio tensor shape: {audio_tensor.shape}")
+        
         audio_tensor = audio_tensor.to(device)
+        print(f"[DEBUG] Moved to device: {device}")
         
         # Run inference
         with torch.no_grad():
-            output = model(audio_tensor)
-            score = output.item()
+            # Model returns (hidden_features, output_logits)
+            # output_logits shape: [batch_size, 2] where [fake_score, real_score]
+            _, output = model(audio_tensor)
+            print(f"[DEBUG] Model output: {output}")
+            
+            # Get scores for fake and real
+            fake_score = output[0, 0].item()
+            real_score = output[0, 1].item()
+            score = real_score - fake_score  # Difference score
         
         # Interpret result
-        # Lower score = fake, Higher score = real
-        # Threshold typically around 0 (sigmoid output)
+        # Higher score = real, Lower score = fake
         prediction = "real" if score > 0 else "fake"
         
         # Calculate confidence (0-1)
@@ -192,8 +204,13 @@ async def predict(file: UploadFile = File(...)):
         )
     
     except Exception as e:
+        # Print full traceback for debugging
+        import traceback
+        print(f"[ERROR] Exception occurred: {str(e)}")
+        print(traceback.format_exc())
+        
         # Clean up temp file if it exists
-        if os.path.exists(temp_path):
+        if temp_path and os.path.exists(temp_path):
             os.remove(temp_path)
         raise HTTPException(status_code=500, detail=f"Prediction error: {str(e)}")
 
