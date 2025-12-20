@@ -20,7 +20,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
-from torchcontrib.optim import SWA
+from torch.optim.swa_utils import AveragedModel, SWALR
 
 from data_utils import (Dataset_ASVspoof2019_train,
                         Dataset_ASVspoof2019_devNeval, genSpoof_list)
@@ -112,7 +112,8 @@ def main(args: argparse.Namespace) -> None:
     # get optimizer and scheduler
     optim_config["steps_per_epoch"] = len(trn_loader)
     optimizer, scheduler = create_optimizer(model.parameters(), optim_config)
-    optimizer_swa = SWA(optimizer)
+    swa_model = AveragedModel(model)
+    swa_scheduler = SWALR(optimizer, swa_lr=0.05)
 
     best_dev_eer = 1.
     best_eval_eer = 100.
@@ -175,7 +176,8 @@ def main(args: argparse.Namespace) -> None:
                     f_log.write(log_text + "\n")
 
             print("Saving epoch {} for swa".format(epoch))
-            optimizer_swa.update_swa()
+            swa_model.update_parameters(model)
+            swa_scheduler.step()
             n_swa_update += 1
         writer.add_scalar("best_dev_eer", best_dev_eer, epoch)
         writer.add_scalar("best_dev_tdcf", best_dev_tdcf, epoch)
@@ -183,8 +185,8 @@ def main(args: argparse.Namespace) -> None:
     print("Start final evaluation")
     epoch += 1
     if n_swa_update > 0:
-        optimizer_swa.swap_swa_sgd()
-        optimizer_swa.bn_update(trn_loader, model, device=device)
+        torch.optim.swa_utils.update_bn(trn_loader, swa_model, device=device)
+        model = swa_model.module
     produce_evaluation_file(eval_loader, model, device, eval_score_path,
                             eval_trial_path)
     eval_eer, eval_tdcf = calculate_tDCF_EER(cm_scores_file=eval_score_path,

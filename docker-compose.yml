@@ -1,0 +1,28 @@
+version: "3.8"
+
+services:
+  aasist-api:
+    build: .
+    container_name: aasist-deepfake-detector
+    ports:
+      - "8000:8000"
+    volumes:
+      # Mount model weights (so you don't need to copy them into image)
+      - ./models:/app/models
+      - ./config:/app/config
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s

@@ -1,0 +1,21 @@
+# PyTorch with CUDA support (install separately with index-url)
+torch>=2.0.0
+torchvision>=0.15.0
+torchaudio>=2.0.0
+
+# Core dependencies
+numpy>=1.21.0,<2.0.0
+soundfile>=0.12.0
+tensorboard>=2.11.0
+
+# Audio processing
+librosa>=0.10.0
+scipy>=1.9.0
+
+# API dependencies
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+python-multipart>=0.0.6
+
+# Optional utilities
+pydantic>=2.0.0
