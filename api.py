@@ -16,6 +16,7 @@ import io
 import numpy as np
 import soundfile as sf
 import torch
+import whisper
 from fastapi import FastAPI, File, UploadFile, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -47,12 +48,14 @@ class PredictionResponse(BaseModel):
     prediction: str  # "fake" or "real"
     confidence: float  # 0-1, higher means more confident
     score: float  # raw model score
+    transcript: str = ""  # Speech-to-text transcript
 
 
-# Global model variable
+# Global model variables
 model = None
 device = None
 config = None
+whisper_model = None
 
 
 def load_model(config_path: str = "config/AASIST-L.conf", 
@@ -111,10 +114,16 @@ def preprocess_audio(audio_path: str, max_len: int = 64600) -> torch.Tensor:
 
 @app.on_event("startup")
 async def startup_event():
-    """Load model on startup"""
+    """Load models on startup"""
+    global whisper_model
     try:
         load_model()
         print("✓ AASIST-L model loaded successfully (lightweight version)")
+        
+        # Load Whisper model for transcription
+        print("Loading Whisper model for speech-to-text...")
+        whisper_model = whisper.load_model("base")  # Options: tiny, base, small, medium, large
+        print("✓ Whisper model loaded successfully")
     except Exception as e:
         print(f"✗ Error loading model: {e}")
         print("Please ensure model weights exist at models/weights/AASIST-L.pth")
@@ -213,6 +222,18 @@ async def predict(file: UploadFile = File(...)):
         if prediction == "fake":
             confidence = 1 - confidence
         
+        # Generate transcript using Whisper
+        transcript = ""
+        if whisper_model is not None:
+            try:
+                print("[DEBUG] Generating transcript...")
+                result = whisper_model.transcribe(temp_path)
+                transcript = result["text"].strip()
+                print(f"[DEBUG] Transcript: {transcript}")
+            except Exception as e:
+                print(f"[WARNING] Transcript generation failed: {e}")
+                transcript = "[Transcript unavailable]"
+        
         # Clean up temp file
         os.remove(temp_path)
         
@@ -220,7 +241,8 @@ async def predict(file: UploadFile = File(...)):
             filename=file.filename,
             prediction=prediction,
             confidence=float(confidence),
-            score=float(score)
+            score=float(score),
+            transcript=transcript
         )
     
     except Exception as e:
@@ -313,12 +335,27 @@ async def websocket_endpoint(websocket: WebSocket):
                     if prediction == "fake":
                         confidence = 1 - confidence
                     
+                    # Generate transcript
+                    transcript = ""
+                    if whisper_model is not None:
+                        try:
+                            # Save chunk to temp file for Whisper
+                            temp_path = f"/tmp/ws_chunk_{chunk_id}.wav"
+                            sf.write(temp_path, chunk, SAMPLE_RATE)
+                            result_whisper = whisper_model.transcribe(temp_path)
+                            transcript = result_whisper["text"].strip()
+                            os.remove(temp_path)
+                        except Exception as e:
+                            print(f"[WARNING] Transcript generation failed: {e}")
+                            transcript = ""
+                    
                     result = {
                         "prediction": prediction,
                         "confidence": float(confidence),
                         "score": float(score),
                         "chunk_id": chunk_id,
-                        "buffer_size": len(audio_buffer)
+                        "buffer_size": len(audio_buffer),
+                        "transcript": transcript
                     }
                     
                     await websocket.send_json(result)
@@ -367,11 +404,26 @@ async def websocket_endpoint(websocket: WebSocket):
                     if prediction == "fake":
                         confidence = 1 - confidence
                     
+                    # Generate transcript
+                    transcript = ""
+                    if whisper_model is not None:
+                        try:
+                            # Save chunk to temp file for Whisper
+                            temp_path = f"/tmp/ws_chunk_b64_{chunk_id}.wav"
+                            sf.write(temp_path, audio_chunk, SAMPLE_RATE)
+                            result_whisper = whisper_model.transcribe(temp_path)
+                            transcript = result_whisper["text"].strip()
+                            os.remove(temp_path)
+                        except Exception as e:
+                            print(f"[WARNING] Transcript generation failed: {e}")
+                            transcript = ""
+                    
                     result = {
                         "prediction": prediction,
                         "confidence": float(confidence),
                         "score": float(score),
-                        "chunk_id": chunk_id
+                        "chunk_id": chunk_id,
+                        "transcript": transcript
                     }
                     
                     await websocket.send_json(result)
@@ -818,6 +870,7 @@ async def web_interface():
             const resultClass = result.prediction === 'real' ? 'real' : 'fake';
             const emoji = result.prediction === 'real' ? '✅' : '⚠️';
             const confidence = (result.confidence * 100).toFixed(1);
+            const transcript = result.transcript || '';
             
             const resultHtml = `
                 <div class="result ${resultClass}">
@@ -833,6 +886,7 @@ async def web_interface():
                         <strong>Score:</strong> ${result.score.toFixed(3)}
                         ${filename ? `<br><strong>File:</strong> ${filename}` : ''}
                         ${result.chunk_id !== undefined ? `<br><strong>Chunk:</strong> #${result.chunk_id}` : ''}
+                        ${transcript ? `<br><br><strong>📝 Transcript:</strong><br><em>"${transcript}"</em>` : ''}
                     </div>
                 </div>
             `;
