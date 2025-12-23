@@ -6,15 +6,51 @@ Hardware Setup:
 - Green LED: GPIO 24 (for real audio)
 - Ground: Connect button and LEDs to ground
 """
+import os
+import sys
+os.environ['PYGAME_HIDE_SUPPORT_PROMPT'] = "1"
+# Suppress ALSA warnings
+os.environ['ALSA_CARD'] = 'default'
+
+# Redirect stderr to suppress ALSA warnings
+import contextlib
+
+@contextlib.contextmanager
+def suppress_stderr():
+    """Suppress stderr output at file descriptor level"""
+    # Save the actual stderr file descriptor
+    stderr_fd = sys.stderr.fileno()
+    old_stderr_fd = os.dup(stderr_fd)
+    
+    # Open devnull
+    devnull_fd = os.open(os.devnull, os.O_WRONLY)
+    
+    # Replace stderr with devnull at the file descriptor level
+    os.dup2(devnull_fd, stderr_fd)
+    os.close(devnull_fd)
+    
+    try:
+        yield
+    finally:
+        # Restore stderr
+        os.dup2(old_stderr_fd, stderr_fd)
+        os.close(old_stderr_fd)
+
 import RPi.GPIO as GPIO
-import pyaudio
 import wave
 import requests
 import time
 from pathlib import Path
+import warnings
+warnings.filterwarnings('ignore')
+
+# Import pyaudio with suppressed stderr
+with suppress_stderr():
+    import pyaudio
 
 # Configuration
-API_URL = "http://192.168.1.100:8000/predict"  # Change to your API server IP
+API_URL = "https://10.252.164.77:8000/predict"  # Change to your API server IP (https!!)
+VERIFY_SSL = False  # Set to True if using proper certificate
 BUTTON_PIN = 17
 RED_LED_PIN = 23  # Fake
 GREEN_LED_PIN = 24  # Real
@@ -36,8 +72,9 @@ GPIO.setup(GREEN_LED_PIN, GPIO.OUT)
 GPIO.output(RED_LED_PIN, GPIO.LOW)
 GPIO.output(GREEN_LED_PIN, GPIO.LOW)
 
-# Initialize PyAudio
-audio = pyaudio.PyAudio()
+# Initialize PyAudio with suppressed errors
+with suppress_stderr():
+    audio = pyaudio.PyAudio()
 
 
 def record_audio():
@@ -45,24 +82,41 @@ def record_audio():
     print("🎙️ Recording... (Release button to stop)")
     
     frames = []
-    stream = audio.open(
-        format=AUDIO_FORMAT,
-        channels=CHANNELS,
-        rate=SAMPLE_RATE,
-        input=True,
-        frames_per_buffer=CHUNK
-    )
+    try:
+        stream = audio.open(
+            format=AUDIO_FORMAT,
+            channels=CHANNELS,
+            rate=SAMPLE_RATE,
+            input=True,
+            frames_per_buffer=CHUNK,
+            input_device_index=None  # Use default device
+        )
+    except Exception as e:
+        print(f"❌ Failed to open audio stream: {e}")
+        return None
     
     # Record while button is pressed
-    while GPIO.input(BUTTON_PIN) == GPIO.LOW:
-        data = stream.read(CHUNK)
-        frames.append(data)
+    try:
+        while GPIO.input(BUTTON_PIN) == GPIO.LOW:
+            try:
+                data = stream.read(CHUNK, exception_on_overflow=False)
+                frames.append(data)
+            except Exception as e:
+                print(f"⚠️ Audio read error: {e}")
+                break
+    finally:
+        print("⏹️ Recording stopped")
+        # Stop and close the stream
+        try:
+            stream.stop_stream()
+            stream.close()
+        except Exception:
+            pass
     
-    print("⏹️ Recording stopped")
-    
-    # Stop and close the stream
-    stream.stop_stream()
-    stream.close()
+    # Check if recording is too short
+    if len(frames) < 10:  # At least ~0.6 seconds
+        print("⚠️ Recording too short, please try again")
+        return None
     
     # Save the recorded audio as WAV file
     with wave.open(OUTPUT_FILE, 'wb') as wf:
@@ -81,7 +135,7 @@ def send_to_api(audio_file):
     try:
         with open(audio_file, 'rb') as f:
             files = {'file': ('recording.wav', f, 'audio/wav')}
-            response = requests.post(API_URL, files=files, timeout=10)
+            response = requests.post(API_URL, files=files, timeout=10, verify=VERIFY_SSL)
         
         if response.status_code == 200:
             result = response.json()
@@ -142,41 +196,72 @@ def main():
     print("📌 Press Ctrl+C to exit\n")
     
     try:
+        # Track button state for edge detection
+        last_button_state = GPIO.HIGH
+        
         while True:
-            # Wait for button press
-            GPIO.wait_for_edge(BUTTON_PIN, GPIO.FALLING)
+            # Poll button state instead of using wait_for_edge (more reliable)
+            current_button_state = GPIO.input(BUTTON_PIN)
             
-            # Button pressed - start recording
-            audio_file = record_audio()
-            
-            # Send to API
-            result = send_to_api(audio_file)
-            
-            if result:
-                prediction = result.get('prediction')
-                confidence = result.get('confidence', 0) * 100
+            # Detect falling edge (button press)
+            if last_button_state == GPIO.HIGH and current_button_state == GPIO.LOW:
+                # Debounce - small delay to avoid false triggers
+                time.sleep(0.05)
                 
-                print(f"\n{'='*50}")
-                print(f"Prediction: {prediction.upper()}")
-                print(f"Confidence: {confidence:.1f}%")
-                print(f"{'='*50}\n")
-                
-                # Control LEDs
-                control_leds(prediction)
-            else:
-                # Error - blink both LEDs
-                print("⚠️ Error - blinking both LEDs")
-                for _ in range(5):
-                    GPIO.output(RED_LED_PIN, GPIO.HIGH)
-                    GPIO.output(GREEN_LED_PIN, GPIO.HIGH)
-                    time.sleep(0.1)
-                    GPIO.output(RED_LED_PIN, GPIO.LOW)
-                    GPIO.output(GREEN_LED_PIN, GPIO.LOW)
-                    time.sleep(0.1)
+                # Verify button is still pressed after debounce
+                if GPIO.input(BUTTON_PIN) == GPIO.LOW:
+                    # Button pressed - start recording
+                    audio_file = record_audio()
+                    
+                    # Check if recording was successful
+                    if not audio_file:
+                        time.sleep(0.5)
+                        last_button_state = GPIO.input(BUTTON_PIN)
+                        continue
+                    
+                    # Send to API
+                    result = send_to_api(audio_file)
+                    
+                    if result:
+                        # API might return 'prediction' or 'label'
+                        prediction = result.get('prediction') or result.get('label')
+                        confidence = result.get('confidence', 0)
+                        
+                        # Handle confidence as percentage or decimal
+                        if confidence <= 1.0:
+                            confidence = confidence * 100
+                        
+                        if prediction:
+                            print(f"\n{'='*50}")
+                            print(f"Prediction: {prediction.upper()}")
+                            print(f"Confidence: {confidence:.1f}%")
+                            print(f"{'='*50}\n")
+                            
+                            # Control LEDs
+                            control_leds(prediction)
+                        else:
+                            print("⚠️ Invalid response from API")
+                            result = None
+                    else:
+                        # Error - blink both LEDs
+                        print("⚠️ Error - blinking both LEDs")
+                        for _ in range(5):
+                            GPIO.output(RED_LED_PIN, GPIO.HIGH)
+                            GPIO.output(GREEN_LED_PIN, GPIO.HIGH)
+                            time.sleep(0.1)
+                            GPIO.output(RED_LED_PIN, GPIO.LOW)
+                            GPIO.output(GREEN_LED_PIN, GPIO.LOW)
+                            time.sleep(0.1)
+                    
+                    # Small delay before next recording
+                    time.sleep(0.5)
+                    print("Ready for next recording...\n")
             
-            # Small delay before next recording
-            time.sleep(0.5)
-            print("Ready for next recording...\n")
+            # Update button state for next iteration
+            last_button_state = current_button_state
+            
+            # Small delay to avoid excessive CPU usage
+            time.sleep(0.01)
     
     except KeyboardInterrupt:
         print("\n\n👋 Shutting down...")

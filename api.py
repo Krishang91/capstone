@@ -723,7 +723,7 @@ async def web_interface():
 
     <script>
         const API_URL = window.location.origin;
-        const WS_URL = `ws://${window.location.host}/ws`;
+        const WS_URL = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws`;
         let ws = null;
         let audioContext = null;
         let processor = null;
@@ -920,7 +920,18 @@ if __name__ == "__main__":
     
     # Run server
     print("\n🚀 Starting Deepfake Audio Detection API...")
-    print("📖 Interactive docs: http://localhost:8000/docs")
-    print("🌐 Web interface: http://localhost:8000/web")
-    print("📡 WebSocket: ws://localhost:8000/ws")
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    print("📖 Interactive docs: https://localhost:8000/docs")
+    print("🌐 Web interface: https://localhost:8000/web")
+    print("📡 WebSocket: wss://localhost:8000/ws")
+    
+    # SSL configuration (optional - comment out for HTTP)
+    ssl_keyfile = "key.pem"
+    ssl_certfile = "cert.pem"
+    
+    if os.path.exists(ssl_keyfile) and os.path.exists(ssl_certfile):
+        print("🔒 Running with HTTPS/WSS")
+        uvicorn.run(app, host="0.0.0.0", port=8000, 
+                    ssl_keyfile=ssl_keyfile, ssl_certfile=ssl_certfile)
+    else:
+        print("⚠️  SSL certificates not found, running with HTTP")
+        uvicorn.run(app, host="0.0.0.0", port=8000)
